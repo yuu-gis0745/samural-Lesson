@@ -61,7 +61,7 @@ def format_survey_datetime(value:str)-> str:
     調査日時を表示用の文字列に整える関数
     Excelの値をそのまま使い、空欄の場合は空文字を返す
     """
-    print(type(value))
+    
     if is_blank(value):
         return ""
 
@@ -496,36 +496,36 @@ def write_gis_csv(gis_rows, output_path:str)-> list:
         writer.writeheader()
         writer.writerows(gis_rows)
 
-def main():
-    base_dir = Path(r"E:\protopype\01_survey_tool")
 
-    input_file = base_dir / "01_input" / "sample_forest_survey_3plots.xlsx"
-    cell_mapping_file = base_dir / "02_master" / "forest_survey_cell_mapping.xlsx"
-    check_rules_file = base_dir / "02_master" / "check_rules_forest_survey.csv"
-    output_file = base_dir / "03_output" / "error_log.csv"
-    gis_csv_path = base_dir / "03_output" / "gis_plot_summary.csv"
+# Difyにおける呼び出し用
+def run_check(input_file_path: str,
+              output_dir_path: str,
+              cell_mapping_file_path: str,check_rules_file_path: str,) -> dict:
+    """
+    Excelをチェックし、error_log.csv または qgis_plot_summary.csv を出力する
+    """
+    input_file = Path(input_file_path)
+    output_dir = Path(output_dir_path)
+    cell_mapping_file = Path(cell_mapping_file_path)
+    check_rules_file = Path(check_rules_file_path)
+
+    output_file = output_dir / "error_log.csv"
+    gis_csv_path = output_dir / "gis_plot_summary.csv"
 
     wb = load_workbook(input_file, data_only=True)
 
-    # セル対応表を読み込む
     basic_information = load_basic_inf_cell_mapping(cell_mapping_file)
 
-    # 毎木調査欄の列対応表を読み込む
     tree_information = load_tree_inf_cell_mapping(cell_mapping_file)
-
-    # list[tuple] を dictionary に変換する
     tree_information = dict(tree_information)
 
-    # 毎木調査欄の開始行・終了行を読み込む
     start_row, end_row = load_tree_data_cell_mapping(cell_mapping_file)
-    
-    # check_rules_forest_survey.csvを元にエラーチェックを行う
+
     check_rules = load_check_rules(check_rules_file)
     basic_rules = get_basic_rules(check_rules)
     tree_rules = get_tree_rules(check_rules)
 
-
-    target_sheets = ["P001", "P002", "P003"]
+    target_sheets = wb.sheetnames
 
     all_errors = []
 
@@ -536,7 +536,7 @@ def main():
             ws,
             sheet_name,
             basic_information,
-            basic_rules)
+            basic_rules,)
 
         tree_errors = check_tree_rows(
             ws,
@@ -544,12 +544,12 @@ def main():
             tree_information,
             start_row,
             end_row,
-            tree_rules)
+            tree_rules,)
 
         all_errors.extend(basic_errors)
         all_errors.extend(tree_errors)
 
-    output_file.parent.mkdir(parents=True, exist_ok=True)
+    output_dir.mkdir(parents=True, exist_ok=True)
 
     with open(output_file, "w", newline="", encoding="utf-8-sig") as f:
         fieldnames = [
@@ -570,21 +570,65 @@ def main():
         print(f"チェック完了: {output_file}")
         print(f"エラー件数: {len(all_errors)}")
 
-         # エラーがある場合は、QGIS用CSVを出力しない
-        if all_errors:
-            print("エラーがあるため、qgis_plot_summary.csv は出力しません。")
-            print("error_log.csv を確認して、Excelを修正してから再実行してください。")
-            return
+    if all_errors:
+        return {
+            "status": "error",
+            "error_count": len(all_errors),
+            "message": "エラーがあります。error_log.csvを確認してください。",
+            "error_log_path": str(output_file),
+            "gis_csv_path": "",}
 
-        # エラーがない場合だけ、QGIS用CSVを作成する
-        gis_rows = []
+    gis_rows = []
 
-        for ws in wb.worksheets:
-            sheet_name = ws.title
-            summary_row = create_gis_summary_row(ws, sheet_name, tree_information, start_row)
-            gis_rows.append(summary_row)
+    for ws in wb.worksheets:
+        sheet_name = ws.title
+        summary_row = create_gis_summary_row(
+            ws,
+            sheet_name,
+            tree_information,
+            start_row,)
+        gis_rows.append(summary_row)
 
-            write_gis_csv(gis_rows, gis_csv_path)
+    write_gis_csv(gis_rows, gis_csv_path)
+
+    return {
+        "status": "success",
+        "error_count": 0,
+        "message": "エラーはありません。GIS用CSVを出力しました。",
+        "error_log_path": str(output_file),
+        "gis_csv_path": str(gis_csv_path),}
+
+
+# Pythonにおける確認用
+def main_local():
+    base_dir = Path(r"E:\protopype\01_survey_tool")
+
+    result = run_check(
+        input_file_path=str(base_dir / "01_input" / "sample_forest_survey_3plots.xlsx"),
+        output_dir_path=str(base_dir / "03_output"),
+        cell_mapping_file_path=str(base_dir / "02_master" / "forest_survey_cell_mapping.xlsx"),
+        check_rules_file_path=str(base_dir / "02_master" / "check_rules_forest_survey.csv"),)
+
+    print(result)
 
 if __name__ == "__main__":
-    main()
+    main_local()
+
+
+# Dify用の入口関数
+def main(input_file_path: str,
+    output_dir_path: str,
+    cell_mapping_file_path: str, check_rules_file_path: str,) -> dict:
+
+    result = run_check(
+        input_file_path=input_file_path,
+        output_dir_path=output_dir_path,
+        cell_mapping_file_path=cell_mapping_file_path,
+        check_rules_file_path=check_rules_file_path,)
+
+    return {
+        "status": result["status"],
+        "error_count": result["error_count"],
+        "message": result["message"],
+        "error_log_path": result["error_log_path"],
+        "gis_csv_path": result["gis_csv_path"],}
