@@ -5,28 +5,49 @@ from pathlib import Path
 import io
 import csv
 import json
+import os
+from google.cloud import vision
+import fitz  # pymupdf（PDFをページごとに画像化するために使う）
 
 # ==============================================================
-# エラー判別とGIS用csv出力、FastAPI、エラー判別追加のためのコード
+# 入力されたxlsxから、以下の処理を実行するコードです。
+# ・エラー判定のルール設定
+# ・OCRによるpdf読み取り
+# ・エラー判定
+# ・既存のエラー判別コードにないエラー候補を追加
+# ・エラーログ出力
+# ・GIS用のcsv出力
 # ==============================================================
 
 app = FastAPI()
 
 # masterフォルダのパスを定義する
-MASTER_DIR = Path(__file__).parent / "master"
+# 環境変数 MASTER_DIR があればそれを使い、なければ従来の ./master を使う
+DEFAULT_MASTER_DIR = Path(__file__).parent / "master"
+MASTER_DIR = Path(os.environ.get("MASTER_DIR", DEFAULT_MASTER_DIR))
 
-# 1. ファイルの読み込み
+# Cloud Vision API 認証ファイルのパスを設定する
+# 環境変数 GOOGLE_APPLICATION_CREDENTIALS が未設定のときだけ、ローカル既定値を補う
+DEFAULT_GCP_KEY = "C:/Users/Owner/Documents/gcp_keys/vision-ocr.json"
+os.environ.setdefault("GOOGLE_APPLICATION_CREDENTIALS", DEFAULT_GCP_KEY)
+
+
+# ==============================================================
+# エラー判定のルール設定
+# ==============================================================
+
 def is_blank(value: str) -> bool:
     """
     空欄判定
     None、空文字、スペースのみを空欄とみなす
     """
+    # Noneは、str(None)="None"になるため先に判定を行う
     if value is None:
         return True
     
-    # 空欄、Noneを判定する
-    # 半角・全角スペースの両方を除去して判定する
-    cleaned = str(value).strip().replace("\u3000", "")  # ← == "" を削除
+    # 型にこだわらず判定を行うため、全て文字列に一度変換する
+    # 半角・全角スペース(u3000)の両方を除去して判定する
+    cleaned = str(value).strip().replace("\u3000", "") 
     return cleaned == ""  # ← ここで比較する
 
 def to_float(value:float)-> float:
@@ -34,25 +55,28 @@ def to_float(value:float)-> float:
     数値に変換する関数
     空欄または数値変換できない値は None を返す
     """
-    # 数値を一度浮動小数点型に変換
-
+    # 空欄であれば、Noneを返す
     if is_blank(value):
         return None
-
-    try:
-        return float(value)
-    except ValueError:
-        return None
+    
+    # 例外処理(数値ではないもの(例：abc)があった場合には、Noneを返す)
+    try: 
+        return float(value) # 例外が発生する可能性のある処理
+    except ValueError: # 例外型
+        return None # 例外が発生したときに実行する処理
 
 def format_decimal(value, digits:float)-> float:
     """
     小数点以下の桁数をそろえる関数
     """
     value_float = to_float(value)
-
+    
+    # value_floatがNoneの場合は、空文字を返す
     if value_float is None:
         return ""
-
+    
+    # digits：浮動小数点数（float）を指定した桁数でフォーマット
+    # フォーマット文字列を戻り値とする（例：digits=1 なら 3.14159 → "3.1"）
     return f"{value_float:.{digits}f}"
 
 def format_survey_datetime(value:str)-> str:
@@ -60,10 +84,11 @@ def format_survey_datetime(value:str)-> str:
     調査日時を表示用の文字列に整える関数
     Excelの値をそのまま使い、空欄の場合は空文字を返す
     """
-    
+    # 調査日時のNone、スペース、空欄判定
     if is_blank(value):
         return ""
-
+    
+    # 空欄や空文字、None、スペースがあれば削除する 
     return str(value).strip()
 
 def is_unused_tree_row(tree_species:str, tree_height:float, 
@@ -73,12 +98,12 @@ def is_unused_tree_row(tree_species:str, tree_height:float,
     番号は最初から入力されている可能性があるため、判定に使わない
     """
     return (
-        is_blank(tree_species)
-        and is_blank(tree_height)
-        and is_blank(branch_height)
-        and is_blank(dbh)
-        and is_blank(abnormal_type)
-        and is_blank(damage_type))
+        is_blank(tree_species) # 樹種に空欄や空文字、None、スペースがあるか判定
+        and is_blank(tree_height) # 樹高(m)に空欄や空文字、None、スペースがあるか判定
+        and is_blank(branch_height) # 枝下高(m)に空欄や空文字、None、スペースがあるか判定
+        and is_blank(dbh) # 胸高直径(cm)に空欄や空文字、None、スペースがあるか判定
+        and is_blank(abnormal_type) # 異常区分に空欄や空文字、None、スペースがあるか判定
+        and is_blank(damage_type)) # 被害区分に空欄や空文字、None、スペースがあるか判定
 
 def load_basic_inf_cell_mapping(cell_mapping_file:str)-> str:
     """
@@ -91,19 +116,21 @@ def load_basic_inf_cell_mapping(cell_mapping_file:str)-> str:
 
     basic_information = []
 
+    # 列名を取り出す
     for row in sheet.iter_rows(
         min_row=3,
         max_row=14,
         min_col=2,
         max_col=4,
-        values_only=True):
-        item_name = row[0]      # B列：項目名
-        cell_address = row[2]   # D列：セル位置
+        values_only=True): # セル値のみを返すかどうか判定
+        item_name = row[0]      # B列：項目名を取得
+        cell_address = row[2]   # D列：セル位置を取得
 
         if is_blank(item_name) or is_blank(cell_address):
             continue
 
-        basic_information.append((item_name, cell_address))
+        basic_information.append((item_name, cell_address)
+        )
 
     return basic_information
 
@@ -124,7 +151,7 @@ def load_tree_inf_cell_mapping(cell_mapping_file:str)-> str:
         max_row=9,
         min_col=2,
         max_col=4,
-        values_only=True):
+        values_only=True): # セル値のみを返すかどうか判定
         columns = row[0] # B列：項目名
         columns_num = i
         i = i + 1
@@ -132,7 +159,8 @@ def load_tree_inf_cell_mapping(cell_mapping_file:str)-> str:
         if is_blank(columns) or is_blank(columns_num):
             continue
 
-        tree_information.append((columns, columns_num))
+        tree_information.append((columns, columns_num)
+        )
 
     return tree_information
 
@@ -150,10 +178,11 @@ def load_tree_data_cell_mapping(cell_mapping_file:str)-> tuple:
         max_row=9,
         min_col=2,
         max_col=4,
-        values_only=True):
+        values_only=True): # セル値のみを返すかどうか判定
 
         cell_address = row[2]   # D列：セル範囲 例 B7:B76
         
+        # None、空文字、空欄があればcontinueする
         if is_blank(cell_address):
             continue
 
@@ -161,7 +190,8 @@ def load_tree_data_cell_mapping(cell_mapping_file:str)-> tuple:
         end_cell = cell_address.split(":")[1]    # 例 B76
 
         start_row = int(start_cell[1:])  # 7
-        end_row = int(end_cell[1:])      # 76
+        end_row = int(end_cell[1:]
+        )  # 76
 
         return start_row, end_row
 
@@ -216,24 +246,68 @@ def get_tree_rules(check_rules: list) -> list:
         if rule["category"] == "毎木"]
 
 
+# ==============================================================
+# OCRによるPDF処理
+# ==============================================================
 
-# 2. エラーチェック
+def ocr_pdf(pdf_bytes, zoom: float = 2.0):
+    """
+    PDFのバイト列を受け取り、全ページの文字をテキストとして返す関数。
+    pymupdfで1ページずつ画像化 → Vision APIでOCR する方式に変更。
+    Pythonのモジュールで、表形式に強いためpymupdfを使用。
+
+    zoom: 画像化するときの解像度の倍率（72dpi × zoom）。
+          検証の結果、2.0 が精度・速度・メモリのバランスが良いため既定値にする。
+    """
+    # Google Cloud Vision（OCRサービス）と話すための"窓口"を1つ作って、clientという名前で持っておく
+    # Googleのサーバー（クラウド） がOCRを行い、その結果をclientで受け取る
+    # DEFAULT_GCP_KEYとos.environ.setdefaultを環境変数として認証
+    client = vision.ImageAnnotatorClient() # 「電話機を1台、用意する」イメージ
+
+    # バイト列からPDFを開く（ファイルではなくメモリ上のデータなのでstream=を使う）
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    # 指定なしでは72dpiで画像化するため、zoomで倍にする
+    matrix = fitz.Matrix(zoom, zoom)  # 解像度の拡大率（72dpi × zoom）
+
+    page_texts = []
+    for page in doc:
+        # ページを画像（pixmap）に変換し、PNGのバイト列にする
+        pix = page.get_pixmap(matrix=matrix) # PDFというファイル形式」のままでは画像用のOCRに渡せないので、ページを一度PNG画像として描き直す
+        # pix（pymupdf独自の画像データ）をpng形式のバイト列に変換
+        png_bytes = pix.tobytes("png")  # バイト列を使うことで、ディスクにpngを保存せずメモリ上だけで処理
+
+        # 画像をVision APIでOCR（画像なのでdocument_text_detectionが使える）
+        image = vision.Image(content=png_bytes) # contentにより、画像データそのものをGoogleサーバーに渡せる
+        # 画像データをGoogleサーバーにclientを通して渡す
+        response = client.document_text_detection(image=image) # 帳票形式であるため、DOCUMENT_TEXT_DETECTION を選択
+        page_texts.append(response.full_text_annotation.text) # full_text_annotationがOCRした文書全体のまとまり
+
+    # 全ページを区切り線でつなげて1本のテキストにする
+    # ocr_pdf_endpointでは、関数の戻り値がreturn {"text": text}で1つである必要がある
+    return "\n----- page break -----\n".join(page_texts) # joinは、要素の間にだけ区切りを入れる
+
+
+# ==============================================================
+# エラーチェック
+# ==============================================================
+
 def calc_average(values:float)->float:
     """
     平均値を計算する関数
     空リストの場合は None を返す
     """
-    # 樹高、枝下高、胸高直径の平均値算出に必要
-
+    
     valid_values = []
 
     for value in values:
         if value is not None:
+            # Noneでなければ、valid_valuesに樹高、枝下高、胸高直径をそれぞれ足していく
             valid_values.append(value)
 
     if len(valid_values) == 0:
         return None
-  
+    # valid_valuesの平均値を、valid_valuesの個数で算出する
+    # 樹高、枝下高、胸高直径の平均値算出に必要
     return sum(valid_values) / len(valid_values)
 
 def make_error(sheet_name, row_no, item_name, rule):
@@ -411,8 +485,10 @@ def check_tree_rows(ws, sheet_name, tree_information: dict, start_row: int, end_
 
     return errors
 
-
+# ==============================================================
 # LLM用：調査データをテキスト形式にまとめる
+# ==============================================================
+
 def extract_survey_text_for_llm(ws, sheet_name, tree_information: dict, start_row: int, end_row: int) -> str:
     """
     LLMに渡すための調査データをテキスト形式に変換する関数
@@ -458,7 +534,11 @@ def extract_survey_text_for_llm(ws, sheet_name, tree_information: dict, start_ro
 
     return "\n".join(lines)
 
+
+# ==============================================================
 # GIS結合用csv出力
+# ==============================================================
+
 def create_gis_summary_row(ws, sheet_name, tree_information: dict, start_row: int, end_row:int)-> dict:
     """
     GIS結合用CSVに出力する1地点分の集計行を作成する
@@ -557,11 +637,40 @@ def write_gis_csv(gis_rows, output_path:str)-> list:
         writer.writeheader()
         writer.writerows(gis_rows)
 
+# ==============================================================
+# Google Cloud Vision API呼び出し
+# ==============================================================
 
-@app.get("/")
-def read_root():
-    return {"status": "ok"}
+@app.post("/ocr_pdf")
+async def ocr_pdf_endpoint(
+    pdf_file: UploadFile = File(...)
+):
+    """
+    PDFを受け取りOCRでテキストを抽出するエンドポイント
+    """
+    # awaitを付けることで、ファイルの読み込みが完了してから次の処理に進む
+    pdf_bytes = await pdf_file.read()
+    text = ocr_pdf(pdf_bytes)
 
+    # ページ別の文字数を確認（空ページや極端に少ない場合は警告）
+    pages = text.split("\n----- page break -----\n")
+    warnings = []
+    for i, page_text in enumerate(pages):
+        if len(page_text.strip()) < 50:  # 50文字未満は怪しい
+            warnings.append(f"ページ{i+1}: 文字数が少ない（{len(page_text.strip())}文字）")
+
+    return {"text": text,
+            "ocr_warnings": warnings  # Dify側でこの警告を活用できる
+    }
+
+def is_ocr_unreadable(value: str) -> bool:
+    """OCRで読み取れなかった項目かどうか判定"""
+    return str(value).strip() == "OCR_UNREADABLE"
+
+
+# ==============================================================
+# エラーあり
+# ==============================================================
 
 # エラーログをUTF-8 BOM付きCSVで返す
 @app.post("/export_error_log")
@@ -612,64 +721,9 @@ async def export_error_log(
     )
 
 
-# GIS用サマリーをUTF-8 BOM付きCSVで返す
-@app.post("/export_gis_csv")
-async def export_gis_csv(
-    survey_file: UploadFile = File(...)
-):
-    """
-    GIS結合用サマリーをUTF-8 BOM付きCSVファイルとして返すエンドポイント
-    Excelで直接開いても文字化けしない
-    エラーがある場合は空のCSVを返す
-    """
-    survey_bytes = await survey_file.read()
-    wb = load_workbook(io.BytesIO(survey_bytes), data_only=True)
-
-    cell_mapping_file = MASTER_DIR / "forest_survey_cell_mapping.xlsx"
-    check_rules_file = MASTER_DIR / "check_rules_forest_survey.csv"
-
-    basic_information = load_basic_inf_cell_mapping(cell_mapping_file)
-    tree_information = dict(load_tree_inf_cell_mapping(cell_mapping_file))
-    start_row, end_row = load_tree_data_cell_mapping(cell_mapping_file)
-
-    check_rules = load_check_rules(check_rules_file)
-    basic_rules = get_basic_rules(check_rules)
-    tree_rules = get_tree_rules(check_rules)
-
-    all_errors = []
-    for sheet_name in wb.sheetnames:
-        ws = wb[sheet_name]
-        all_errors.extend(check_basic_info(ws, sheet_name, basic_information, basic_rules))
-        all_errors.extend(check_tree_rows(ws, sheet_name, tree_information, start_row, end_row, tree_rules))
-
-    fieldnames = [
-        "調査ID", "シート名", "地域名", "調査日時", "天気",
-        "記帳者", "対象樹種", "面積(㎡)", "斜面位置", "斜面方位",
-        "傾斜度", "緯度", "経度",
-        "平均樹高(m)", "平均枝下高(m)", "平均胸高直径(cm)", "立木本数",
-    ]
-
-    gis_rows = []
-    if not all_errors:
-        for sheet_name in wb.sheetnames:
-            ws = wb[sheet_name]
-            gis_rows.append(
-                create_gis_summary_row(ws, sheet_name, tree_information, start_row, end_row)
-            )
-
-    output = io.StringIO()
-    writer = csv.DictWriter(output, fieldnames=fieldnames)
-    writer.writeheader()
-    writer.writerows(gis_rows)
-
-    encoded = output.getvalue().encode("utf-8-sig")
-
-    return Response(
-        content=encoded,
-        media_type="text/csv",
-        headers={"Content-Disposition": "attachment; filename=gis_plot_summary.csv"}
-    )
-
+# ==============================================================
+# 追加エラー候補追加
+# ==============================================================
 
 # エラー判別コードに新たなルールを追加する
 @app.post("/add_rules")
@@ -736,7 +790,77 @@ async def add_rules(request: Request):
     return {"added_count": added_count, "status": "ok"}
 
 
+# ==============================================================
+# エラーなし(GIS用フォーマット出力)
+# ==============================================================
+
+@app.get("/")
+def read_root():
+    return {"status": "ok"}
+
+# GIS用サマリーをUTF-8 BOM付きCSVで返す
+@app.post("/export_gis_csv")
+async def export_gis_csv(
+    survey_file: UploadFile = File(...)
+):
+    """
+    GIS結合用サマリーをUTF-8 BOM付きCSVファイルとして返すエンドポイント
+    Excelで直接開いても文字化けしない
+    エラーがある場合は空のCSVを返す
+    """
+    survey_bytes = await survey_file.read()
+    wb = load_workbook(io.BytesIO(survey_bytes), data_only=True)
+
+    cell_mapping_file = MASTER_DIR / "forest_survey_cell_mapping.xlsx"
+    check_rules_file = MASTER_DIR / "check_rules_forest_survey.csv"
+
+    basic_information = load_basic_inf_cell_mapping(cell_mapping_file)
+    tree_information = dict(load_tree_inf_cell_mapping(cell_mapping_file))
+    start_row, end_row = load_tree_data_cell_mapping(cell_mapping_file)
+
+    check_rules = load_check_rules(check_rules_file)
+    basic_rules = get_basic_rules(check_rules)
+    tree_rules = get_tree_rules(check_rules)
+
+    all_errors = []
+    for sheet_name in wb.sheetnames:
+        ws = wb[sheet_name]
+        all_errors.extend(check_basic_info(ws, sheet_name, basic_information, basic_rules))
+        all_errors.extend(check_tree_rows(ws, sheet_name, tree_information, start_row, end_row, tree_rules))
+
+    fieldnames = [
+        "調査ID", "シート名", "地域名", "調査日時", "天気",
+        "記帳者", "対象樹種", "面積(㎡)", "斜面位置", "斜面方位",
+        "傾斜度", "緯度", "経度",
+        "平均樹高(m)", "平均枝下高(m)", "平均胸高直径(cm)", "立木本数",
+    ]
+
+    gis_rows = []
+    if not all_errors:
+        for sheet_name in wb.sheetnames:
+            ws = wb[sheet_name]
+            gis_rows.append(
+                create_gis_summary_row(ws, sheet_name, tree_information, start_row, end_row)
+            )
+
+    output = io.StringIO()
+    writer = csv.DictWriter(output, fieldnames=fieldnames)
+    writer.writeheader()
+    writer.writerows(gis_rows)
+
+    encoded = output.getvalue().encode("utf-8-sig")
+
+    return Response(
+        content=encoded,
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=gis_plot_summary.csv"}
+    )
+
+
+# ==============================================================
 # メインの処理
+# ==============================================================
+
 @app.post("/analyze")
 async def analyze(
     survey_file: UploadFile = File(...)
@@ -787,8 +911,7 @@ async def analyze(
 
         all_errors.extend(basic_errors)
         all_errors.extend(tree_errors)
-
-
+    
     # 6. エラーがない場合のみGISサマリーを作成する
     gis_rows = []
 
@@ -821,3 +944,279 @@ async def analyze(
         "gis_summary": gis_rows,
         "survey_text_for_llm": survey_text_for_llm  # Dify LLMに渡す用
     }
+
+
+# ==============================================================
+# PDF/OCR → Excelフォーマット復元
+# ==============================================================
+
+def build_survey_workbook(plots: list, template_file, cell_mapping_file) -> io.BytesIO:
+    """
+    構造化済みのJSON(plots)を、調査票テンプレートに流し込んで
+    1地点=1シートのxlsx（バイト列）を作る関数。
+
+    plots の形（1要素=1地点）:
+        {
+          "調査ID": "P001", "地域名": "A地区", ... "経度": 134.14,
+          "trees": [
+            {"番号":1,"樹種":"スギ","樹高(m)":18.5,"枝下高(m)":10.6,
+             "胸高直径(cm)":42.8,"異常区分":"なし","被害区分":"なし","備考":""},
+            ...
+          ]
+        }
+    """
+
+    # セル対応表から「項目名→セル位置」「項目名→列番号」「データ行範囲」を取得する
+    # ＝既存のチェック処理と同じ対応表を使うので、出力フォーマットが完全に揃う
+    basic_information = load_basic_inf_cell_mapping(cell_mapping_file)      # [(項目名, "B2"), ...]
+    tree_information = dict(load_tree_inf_cell_mapping(cell_mapping_file))  # {"樹種": 2, ...}
+    start_row, end_row = load_tree_data_cell_mapping(cell_mapping_file)     # 7, 76
+
+    # テンプレートを開く（data_only=Falseで集計セルの数式を保持する）
+    wb = load_workbook(template_file)
+    template_ws = wb[wb.sheetnames[0]]
+
+    # 地点が無ければテンプレートをそのまま返す（空シート保持のため）
+    if not plots:
+        buf = io.BytesIO()
+        wb.save(buf)
+        buf.seek(0)
+        return buf
+
+    used_names = set() # シート名の重複を避けるためsetを使う
+    for i, plot in enumerate(plots):
+        # シート名は調査ID優先。無ければPlot連番。
+        raw_name = str(plot.get("調査ID") or f"Plot{i + 1}").strip()
+        sheet_name = (raw_name or f"Plot{i + 1}")[:31] # Excelのシート名は31文字まで
+        # 同名シートを避ける
+        base = sheet_name
+        n = 2
+        while sheet_name in used_names:
+            sheet_name = f"{base[:28]}_{n}"
+            n += 1
+        used_names.add(sheet_name)
+
+        # テンプレートをコピーして新しいシートを作る（書式・数式ごと複製）
+        ws = wb.copy_worksheet(template_ws)
+        ws.title = sheet_name
+
+        # 基本情報を所定のセルへ書き込む（例: 調査ID→B2）
+        for item_name, cell_address in basic_information:
+            if item_name in plot and plot[item_name] is not None:
+                ws[cell_address] = plot[item_name]
+
+        # 毎木データを7行目から順に書き込む
+        trees = plot.get("trees", []) or []
+        for idx, tree in enumerate(trees):
+            row = start_row + idx
+            if row > end_row:
+                break  # 最大70本を超えた分は捨てる
+            for item_name, col in tree_information.items():
+                if item_name in tree and tree[item_name] not in (None, ""):
+                    ws.cell(row=row, column=col, value=tree[item_name])
+
+    # 元のテンプレートシートは不要なので削除する
+    wb.remove(template_ws)
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return buf
+
+
+# xlsxを返すときのMIMEタイプ
+XLSX_MEDIA_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+
+# ==============================================================
+# PDF/OCRで抽出した調査データをCSVとして出力
+# ==============================================================
+
+@app.post("/export_ocr_csv")
+async def export_ocr_csv(request: Request):
+    """
+    DifyのLLMノードで構造化したJSONを受け取り、
+    OCRで抽出した調査結果をUTF-8 BOM付きCSVとして返す。
+
+    出力形式:
+      1行 = 1本の立木データ。
+      地点の基本情報は、立木データの各行へ繰り返して記録する。
+      立木データが無い地点も、基本情報だけで1行出力する。
+    """
+
+    # Difyから送信されたJSONを受け取る
+    raw_body = await request.body()
+
+    try:
+        # JSONをPythonで扱えるdict型またはlist型に変換する
+        data = json.loads(raw_body)
+
+        # JSON文字列が二重に入れ子になっている場合にも対応する
+        if isinstance(data, str):
+            data = json.loads(data)
+
+    except Exception:
+        return {"status": "parse_error"}
+
+    # {"plots": [...]} と [...] の両方に対応する
+    # dataのオブジェクト型がdictかlistかそれ以外かどうか判定する
+    if isinstance(data, dict): 
+        plots = data.get("plots", [])
+
+    elif isinstance(data, list):
+        plots = data
+    # dataのオブジェクト型がdictかlistでもなければ空にする
+    else:
+        plots = []
+
+    # CSVの列名
+    fieldnames = [
+        "調査ID",
+        "地域名",
+        "調査日時",
+        "天気",
+        "記帳者",
+        "対象樹種",
+        "面積(㎡)",
+        "斜面位置",
+        "斜面方位",
+        "傾斜度",
+        "緯度",
+        "経度",
+        "番号",
+        "樹種",
+        "樹高(m)",
+        "枝下高(m)",
+        "胸高直径(cm)",
+        "異常区分",
+        "被害区分",
+        "備考",
+    ]
+
+    # 地点全体に関する項目
+    basic_fields = [
+        "調査ID",
+        "地域名",
+        "調査日時",
+        "天気",
+        "記帳者",
+        "対象樹種",
+        "面積(㎡)",
+        "斜面位置",
+        "斜面方位",
+        "傾斜度",
+        "緯度",
+        "経度",
+    ]
+
+    # 立木1本ごとに異なる項目
+    tree_fields = [
+        "番号",
+        "樹種",
+        "樹高(m)",
+        "枝下高(m)",
+        "胸高直径(cm)",
+        "異常区分",
+        "被害区分",
+        "備考",
+    ]
+
+    rows = []
+
+    for plot in plots:
+        if not isinstance(plot, dict):
+            continue
+
+        # 地点の基本情報を取得する
+        basic_row = {
+            field: plot.get(field, "")
+            for field in basic_fields
+        }
+
+        trees = plot.get("trees", []) or []
+
+        # 立木データが無い地点も、地点情報だけで1行残す
+        if not trees:
+            row = basic_row.copy()
+
+            row.update({
+                field: ""
+                for field in tree_fields
+            })
+
+            rows.append(row)
+            continue
+
+        # 立木1本につきCSVを1行作成する
+        for tree in trees:
+            if not isinstance(tree, dict):
+                continue
+
+            row = basic_row.copy()
+
+            row.update({
+                field: tree.get(field, "")
+                for field in tree_fields
+            })
+
+            rows.append(row)
+
+    # CSVをメモリ上で作成する
+    output = io.StringIO()
+
+    writer = csv.DictWriter(
+        output,
+        fieldnames=fieldnames
+    )
+
+    writer.writeheader()
+    writer.writerows(rows)
+
+    # Excelで文字化けしにくい形式にする
+    encoded = output.getvalue().encode("utf-8-sig")
+
+    return Response(
+        content=encoded,
+        media_type="text/csv",
+        headers={
+            "Content-Disposition":
+            "attachment; filename=ocr_survey_results.csv"
+        },
+    )
+
+# Dify側でLLM構造化 → そのJSONを受け取りxlsxを返す ---
+@app.post("/build_xlsx_from_json")
+async def build_xlsx_from_json(request: Request):
+    """
+    構造化済みJSON（{"plots":[...]} もしくは [...] 形式）を受け取り、
+    調査票テンプレートに流し込んだxlsxを返すエンドポイント。
+    DifyのLLMノードで作ったJSONをここへPOSTする想定（パターンA）。
+    """
+    raw_body = await request.body()
+
+    try:
+        data = json.loads(raw_body)
+        # 文字列が二重にネストされている場合もほどく
+        if isinstance(data, str):
+            data = json.loads(data)
+    except Exception:
+        return {"status": "parse_error"}
+
+    # {"plots":[...]} でも [...] でも受け付ける
+    if isinstance(data, dict):
+        plots = data.get("plots", [])
+    elif isinstance(data, list):
+        plots = data
+    else:
+        plots = []
+
+    template_file = MASTER_DIR / "template_forest_survey.xlsx"
+    cell_mapping_file = MASTER_DIR / "forest_survey_cell_mapping.xlsx"
+
+    buf = build_survey_workbook(plots, template_file, cell_mapping_file)
+
+    return Response(
+        content=buf.getvalue(),
+        media_type=XLSX_MEDIA_TYPE,
+        headers={"Content-Disposition": "attachment; filename=survey_from_pdf.xlsx"},
+    )
