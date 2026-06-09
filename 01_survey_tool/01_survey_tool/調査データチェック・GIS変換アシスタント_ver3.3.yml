@@ -12,7 +12,7 @@ app:
   icon_background: '#FFEAD5'
   icon_type: emoji
   mode: workflow
-  name: 調査データチェック・GIS変換アシスタント_ver3.2
+  name: 調査データチェック・GIS変換アシスタント_ver3.3
   use_icon_as_answer_icon: false
 dependencies:
 - current_identifier: null
@@ -1230,11 +1230,11 @@ workflow:
       height: 96
       id: '1780735730593'
       position:
-        x: -993.1634134155134
-        y: -7.265320139253518
+        x: -895.5198280183191
+        y: 24.40286971929598
       positionAbsolute:
-        x: -993.1634134155134
-        y: -7.265320139253518
+        x: -895.5198280183191
+        y: 24.40286971929598
       selected: false
       sourcePosition: right
       targetPosition: left
@@ -1266,14 +1266,16 @@ workflow:
             \n## 前提条件\n- 紙に手書きで記載した文字や数字をOCRで抽出しております。\n- 二重の取り消し線や乱雑な字で記載されている場合がございます。\n\
             - 汚れや折れ、破れがある場合がございます。\n\n## 絶対条件\n以下の条件を絶対に守ってください。\n- 値を確認できない場合は null\
             \ を出力してください。\n- 数値項目についても、確認できない場合は 0 ではなく null を出力してください。\n- ただし、OCRテキストに文字や数字の痕跡はあるが判読できない場合は、null\
-            \ ではなく \"OCR_UNREADABLE\" を出力してください。\n\n## 指定のJSON形式\n{\n  \"plots\":\
-            \ [\n    {\n      \"調査ID\": null, \"地域名\": null, \"調査日時\": null, \"天気\"\
-            : null,\n      \"記帳者\": null, \"対象樹種\": null, \"面積(㎡)\": null,\n     \
-            \ \"斜面位置\": null, \"斜面方位\": null, \"傾斜度\": null, \"緯度\": null, \"経度\"\
-            : null,\n      \"trees\": [\n        {\"番号\": null, \"樹種\": null, \"樹高(m)\"\
-            : null, \"枝下高(m)\": null,\n         \"胸高直径(cm)\": null, \"異常区分\": null,\
-            \ \"被害区分\": null, \"備考\": \"\"}\n      ]\n    }\n  ]\n}"
-        selected: false
+            \ ではなく \"OCR_UNREADABLE\" を出力してください。\n\n## 指定のJSON形式\n\"null\"ではなく、\"\
+            OCR_UNREADABLE\"を出力する場合は、以下の\"null\"は \"OCR_UNREADABLE\" に変更してください\"\n\
+            {\n  \"plots\": [\n    {\n      \"調査ID\": null, \"地域名\": null, \"調査日時\"\
+            : null, \"天気\": null,\n      \"記帳者\": null, \"対象樹種\": null, \"面積(㎡)\"\
+            : null,\n      \"斜面位置\": null, \"斜面方位\": null, \"傾斜度\": null, \"緯度\":\
+            \ null, \"経度\": null,\n      \"trees\": [\n        {\"番号\": null, \"樹種\"\
+            : null, \"樹高(m)\": null, \"枝下高(m)\": null,\n         \"胸高直径(cm)\": null,\
+            \ \"異常区分\": null, \"被害区分\": null, \"備考\": \"\"}\n      ]\n    }\n  ]\n\
+            }"
+        selected: true
         title: LLM(OCRからの文字抽出)
         type: llm
         vision:
@@ -1281,11 +1283,11 @@ workflow:
       height: 116
       id: '1780736501150'
       position:
-        x: -952.2842154929167
-        y: 136.9401691340207
+        x: -820.3334244156272
+        y: 217.4301516911673
       positionAbsolute:
-        x: -952.2842154929167
-        y: 136.9401691340207
+        x: -820.3334244156272
+        y: 217.4301516911673
       selected: true
       sourcePosition: right
       targetPosition: left
@@ -1593,7 +1595,7 @@ workflow:
       type: custom
       width: 242
     viewport:
-      x: 1338.672275574073
-      y: 331.24526500717866
-      zoom: 0.7578582832551981
+      x: 1051.5428744078804
+      y: 276.1810034387146
+      zoom: 0.42996052494743653
   rag_pipeline_variables: []
